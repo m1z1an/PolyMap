@@ -1,0 +1,41 @@
+name: polymap
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: polymap
+      POSTGRES_USER: polymap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polymap -d polymap"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - polymap-db:/var/lib/postgresql/data
+  api:
+    build:
+      context: ..
+      dockerfile: devops/Dockerfile.backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://polymap:${POSTGRES_PASSWORD}@postgres:5432/polymap
+      POLYMAP_ADMIN_KEY: ${POLYMAP_ADMIN_KEY:?Set POLYMAP_ADMIN_KEY}
+      POLYMAP_ORIGINS: ${POLYMAP_ORIGINS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+  web:
+    build:
+      context: ..
+      dockerfile: devops/Dockerfile.frontend
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      POLYMAP_UPSTREAM: http://api:8000
+      POLYMAP_HOST: 0.0.0.0
+      POLYMAP_PORT: 8080
+    depends_on:
+      - api
+volumes:
+  polymap-db:

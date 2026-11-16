@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "PolyMap",
+    "slug": "polymap",
+    "scheme": "polymap",
+    "version": "1.0.0",
+    "newArchEnabled": true,
+    "plugins": ["expo-router", "@maplibre/maplibre-react-native"],
+    "web": { "bundler": "metro", "output": "single" },
+    "ios": { "bundleIdentifier": "ru.polymap.navigation" },
+    "android": { "package": "ru.polymap.navigation" }
+  }
+}

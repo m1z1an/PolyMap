@@ -1,0 +1,8 @@
+:root { color-scheme: light; }
+body { margin: 0; background: #f5f7f1; }
+button { -webkit-tap-highlight-color: transparent; }
+.map-marker { border: 1px solid #b7c8ba; background: #fffdf7; color: #174f3e; font: 700 11px system-ui; padding: 3px 5px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.map-building { border-color: #e1ede3; background: #174f3e; color: #fff; padding: 5px 7px; }
+.map-selected { background: #dbef74; color: #123b30; border: 2px solid #123b30; z-index: 3; }
+.map-marker:focus-visible { outline: 3px solid #147b5c; outline-offset: 3px; z-index: 4; }
+.map-error { position: absolute; top: 20%; left: 12%; right: 12%; text-align: center; background: #fffdf7; padding: 16px; border-radius: 10px; font: 16px system-ui; }

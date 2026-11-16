@@ -1,0 +1,11 @@
+**/node_modules
+**/dist
+**/.git
+**/.expo
+**/.env
+**/.venv
+**/ios
+**/android
+**/test-results
+**/playwright-report
+**/__pycache__
