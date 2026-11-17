@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Linking, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Link } from 'expo-router';
 import { request } from '../src/api';
 import { Button, colors as c } from '../src/controls';
@@ -8,16 +8,18 @@ import type { Building } from '../src/model';
 
 const statuses = { new: 'Новая', review: 'На проверке', closed: 'Закрыта' } as const;
 type Status = keyof typeof statuses;
+type Outcome = 'fixed' | 'not_confirmed';
 type Ticket = { id: number; building_id: string | null; place_id: string; message: string; status: Status;
-  resolution: string; revision: number; created_at: string; map_version: string };
+  resolution: string; outcome: Outcome | null; correction_map_version: string | null; place_name: string;
+  building_name: string; revision: number; created_at: string; map_version: string };
 const pageSize = 30;
 
 export default function Reports() {
-  const [key, setKey] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [credential, setCredential] = useState('');
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
-  const [places, setPlaces] = useState(new Map<string, string>());
   const [status, setStatus] = useState<Status | ''>('');
   const [building, setBuilding] = useState('');
   const [buildingQuery, setBuildingQuery] = useState('');
@@ -29,7 +31,6 @@ export default function Reports() {
   useEffect(() => {
     loadSnapshot().then(({ data }) => {
       setBuildings(data.buildings);
-      setPlaces(new Map(data.places.map(place => [place.id, place.name])));
     }).catch(() => {});
   }, []);
 
@@ -49,30 +50,41 @@ export default function Reports() {
     return () => controller.abort();
   }, [credential, status, building, offset, refresh]);
 
-  async function save(ticket: Ticket, next: Status, resolution: string) {
+  async function save(ticket: Ticket, next: Status, resolution: string, outcome: Outcome | null, correction_map_version: string | null) {
     const saved = await request<Ticket>(`/reports/${ticket.id}`, {
       method: 'PATCH', headers: { Authorization: `Bearer ${credential}` },
-      body: JSON.stringify({ status: next, resolution, revision: ticket.revision }),
+      body: JSON.stringify({ status: next, resolution, outcome, correction_map_version, revision: ticket.revision }),
     });
     setTickets(previous => status && status !== saved.status
       ? previous.filter(item => item.id !== saved.id)
       : previous.map(item => item.id === saved.id ? saved : item));
+    setRefresh(value => value + 1);
   }
 
   return <ScrollView style={s.page} contentContainerStyle={s.frame} keyboardShouldPersistTaps="handled">
     <Link href="/" style={s.link}>← Карта Политеха</Link>
     <Text style={s.title}>Стол заявок</Text>
-    <TextInput style={s.input} secureTextEntry placeholder="Ключ доступа" accessibilityLabel="Ключ доступа"
-      placeholderTextColor={c.muted} autoCapitalize="none" value={key} onChangeText={setKey} />
-    <View style={s.row}>
-      <Button primary label="Загрузить заявки" disabled={!key.trim()} onPress={() => {
-        setCredential(key.trim()); setOffset(0); setRefresh(value => value + 1);
+    {!credential ? <>
+      <TextInput style={s.input} placeholder="Имя сотрудника" accessibilityLabel="Имя сотрудника"
+        placeholderTextColor={c.muted} autoCapitalize="none" value={username} onChangeText={setUsername} />
+      <TextInput style={s.input} secureTextEntry placeholder="Пароль" accessibilityLabel="Пароль"
+        placeholderTextColor={c.muted} autoCapitalize="none" value={password} onChangeText={setPassword} />
+      <Button primary label="Войти" disabled={!username.trim() || !password || working} onPress={async () => {
+        setWorking(true); setMessage('');
+        try {
+          const result = await request<{ token: string }>('/auth/login', { method: 'POST', body: JSON.stringify({ username: username.trim(), password }) });
+          setCredential(result.token); setPassword(''); setOffset(0);
+        } catch (error) { setMessage((error as Error).message); }
+        finally { setWorking(false); }
       }} />
-      {!!credential && <Button label="Выйти" onPress={() => {
-        setCredential(''); setKey(''); setTickets([]); setMessage(''); setWorking(false);
-      }} />}
-    </View>
+      {!!message && <Text accessibilityRole="alert" style={s.muted}>{message}</Text>}
+    </> : <Button label="Выйти" onPress={async () => {
+      try { await request('/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${credential}` } }); }
+      catch { /* Clear local credentials even if the session has expired. */ }
+      setCredential(''); setTickets([]); setMessage(''); setWorking(false);
+    }} />}
     {!!credential && <>
+      <Button label="Обновить список" onPress={() => setRefresh(value => value + 1)} />
       <View style={s.row}>
         <Button label="Все статусы" active={!status} onPress={() => { setStatus(''); setOffset(0); }} />
         {(Object.keys(statuses) as Status[]).map(item => <Button key={item} label={statuses[item]}
@@ -94,8 +106,7 @@ export default function Reports() {
       {working ? <Text style={s.muted}>Загружаем заявки…</Text> : <>
         {!tickets.length && !message && <Text style={s.muted}>Заявок по выбранным фильтрам пока нет.</Text>}
         {tickets.map(ticket => <TicketCard key={`${ticket.id}-${ticket.revision}`} ticket={ticket}
-          building={buildings.find(item => item.id === ticket.building_id)?.name ?? 'Кампус'}
-          place={places.get(ticket.place_id) ?? ticket.place_id} onSave={save} />)}
+          building={ticket.building_name} place={ticket.place_name} onSave={save} />)}
         <View style={s.row}>
           {offset > 0 && <Button label="Предыдущая страница" onPress={() => setOffset(offset - pageSize)} />}
           {tickets.length === pageSize && <Button label="Следующая страница" onPress={() => setOffset(offset + pageSize)} />}
@@ -107,15 +118,18 @@ export default function Reports() {
 
 function TicketCard({ ticket, building, place, onSave }: {
   ticket: Ticket; building: string; place: string;
-  onSave: (ticket: Ticket, status: Status, resolution: string) => Promise<void>;
+  onSave: (ticket: Ticket, status: Status, resolution: string, outcome: Outcome | null, version: string | null) => Promise<void>;
 }) {
   const [resolution, setResolution] = useState(ticket.resolution);
+  const [outcome, setOutcome] = useState<Outcome | null>(ticket.outcome);
+  const [version, setVersion] = useState(ticket.correction_map_version ?? '');
   const [working, setWorking] = useState(false);
   const [error, setError] = useState('');
   async function submit(status: Status) {
     setWorking(true);
     setError('');
-    try { await onSave(ticket, status, resolution.trim()); }
+    try { await onSave(ticket, status, resolution.trim(), status === 'closed' ? outcome : null,
+      status === 'closed' && outcome === 'fixed' ? version.trim() : null); }
     catch (problem) { setError((problem as Error).message); }
     finally { setWorking(false); }
   }
@@ -123,11 +137,21 @@ function TicketCard({ ticket, building, place, onSave }: {
     <Text style={s.heading}>№{ticket.id} · {statuses[ticket.status]}</Text>
     <Text style={s.muted}>{building} · {place} · {new Date(ticket.created_at).toLocaleDateString('ru-RU')}</Text>
     <Text style={s.body}>{ticket.message}</Text>
+    <Text style={s.muted}>Исходная версия: {ticket.map_version}</Text>
+    {!!ticket.correction_map_version && <Text accessibilityRole="link" style={s.link} onPress={() =>
+      Linking.openURL(`${process.env.EXPO_PUBLIC_API_URL ?? ''}/api/maps/${ticket.correction_map_version}/bundle`)}>
+      Исправленная версия: {ticket.correction_map_version}</Text>}
     <TextInput style={s.input} value={resolution} onChangeText={setResolution} multiline maxLength={2000}
       accessibilityLabel="Результат проверки" placeholder="Результат проверки" placeholderTextColor={c.muted} />
     <View style={s.row}>
+      <Button label="Исправлено" active={outcome === 'fixed'} onPress={() => setOutcome('fixed')} />
+      <Button label="Не подтвердилось" active={outcome === 'not_confirmed'} onPress={() => setOutcome('not_confirmed')} />
+    </View>
+    {outcome === 'fixed' && <TextInput style={s.input} value={version} onChangeText={setVersion} autoCapitalize="none"
+      accessibilityLabel="Версия исправленной карты" placeholder="Версия исправленной карты" placeholderTextColor={c.muted} />}
+    <View style={s.row}>
       <Button label="На проверку" disabled={working} onPress={() => submit('review')} />
-      <Button label="Закрыть заявку" primary disabled={working || !resolution.trim()} onPress={() => submit('closed')} />
+      <Button label="Закрыть заявку" primary disabled={working || !resolution.trim() || !outcome || (outcome === 'fixed' && !/^[a-f0-9]{16}$/.test(version.trim()))} onPress={() => submit('closed')} />
     </View>
     {!!error && <Text accessibilityRole="alert" style={s.muted}>{error}</Text>}
   </View>;

@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
@@ -14,7 +14,7 @@ from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from .db import DATABASE_URL, Publication, Report
+from .db import DATABASE_URL, Employee, EmployeeSession, Publication, Report
 
 app = FastAPI(title="PolyMap API", version="1.0")
 origins = [origin.strip() for origin in os.getenv("POLYMAP_ORIGINS", "").split(",") if origin.strip()]
@@ -33,9 +33,15 @@ class ReportInput(BaseModel):
     place_id: UUID
     message: Message
 
+class LoginInput(BaseModel):
+    username: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+    password: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+
 class ReportUpdate(BaseModel):
     status: Status
     resolution: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] = ""
+    outcome: Literal["fixed", "not_confirmed"] | None = None
+    correction_map_version: Version | None = None
     revision: int = Field(ge=1)
 
 class ReportView(BaseModel):
@@ -47,6 +53,10 @@ class ReportView(BaseModel):
     message: str
     status: Status
     resolution: str
+    outcome: Literal["fixed", "not_confirmed"] | None
+    correction_map_version: str | None
+    place_name: str
+    building_name: str
     revision: int
     created_at: datetime
     updated_at: datetime
@@ -57,10 +67,51 @@ def session():
 
 DB = Annotated[Session, Depends(session)]
 
-def moderator(authorization: Annotated[str, Header()] = ""):
-    key = os.getenv("POLYMAP_ADMIN_KEY", "")
-    if not key or not secrets.compare_digest(authorization.encode(), ("Bearer " + key).encode()):
-        raise HTTPException(401, "Требуется ключ доступа")
+def password_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, salt, _ = encoded.split("$")
+        return algorithm == "scrypt" and secrets.compare_digest(password_hash(password, bytes.fromhex(salt)), encoded)
+    except (ValueError, TypeError):
+        return False
+
+def token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def moderator(db: DB, authorization: Annotated[str, Header()] = "") -> EmployeeSession:
+    token = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
+    session_row = db.get(EmployeeSession, token_digest(token)) if token else None
+    if not session_row or session_row.expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(401, "Требуется вход сотрудника")
+    return session_row
+
+@app.post("/api/auth/login")
+def login(payload: LoginInput, db: DB):
+    employee = db.scalar(select(Employee).where(Employee.username == payload.username))
+    if not employee or not verify_password(payload.password, employee.password_hash):
+        raise HTTPException(401, "Неверное имя сотрудника или пароль")
+    token = secrets.token_urlsafe(32)
+    db.add(EmployeeSession(token_hash=token_digest(token), employee_id=employee.id,
+                           expires_at=datetime.now(timezone.utc) + timedelta(hours=12)))
+    db.commit()
+    return {"token": token, "username": employee.username}
+
+@app.post("/api/auth/logout")
+def logout(db: DB, employee_session: Annotated[EmployeeSession, Depends(moderator)]):
+    db.delete(employee_session)
+    db.commit()
+    return {"ok": True}
+
+def report_view(report: Report, publication: Publication) -> ReportView:
+    place = next((p for p in publication.payload.get("places", []) if p.get("id") == report.place_id), {})
+    building = next ( (b for b in publication.payload.get("buildings", []) if b.get("id") == report.building_id), {})
+    values = {column.name: getattr(report, column.name) for column in Report.__table__.columns}
+    return ReportView(**values, place_name=place.get("name") or report.place_id,
+                      building_name=building.get("name") or (report.building_id or "Кампус"))
 
 def publish(path: Path):
     raw = path.read_bytes()
@@ -113,18 +164,30 @@ def list_reports(db: DB, status: Status | None = None, building_id: UUID | None 
         query = query.where(Report.status == status)
     if building_id:
         query = query.where(Report.building_id == str(building_id))
-    return list(db.scalars(query))
+    reports = list(db.scalars(query))
+    return [report_view(report, db.get(Publication, report.map_version)) for report in reports]
 
 @app.patch("/api/reports/{report_id}", response_model=ReportView, dependencies=[Depends(moderator)])
 def update_report(report_id: int, payload: ReportUpdate, db: DB):
     if payload.status == "closed" and not payload.resolution:
         raise HTTPException(422, "Укажите результат проверки")
+    if payload.status == "closed":
+        if payload.outcome is None:
+            raise HTTPException(422, "Выберите итог проверки")
+        if payload.outcome == "fixed" and (not payload.correction_map_version or not db.get(Publication, payload.correction_map_version)):
+            raise HTTPException(422, "Укажите опубликованную версию с исправлением")
+        original = db.get(Report, report_id)
+        if payload.outcome == "fixed" and original and original.map_version == payload.correction_map_version:
+            raise HTTPException(422, "Исправление должно ссылаться на другую версию карты")
+    if (payload.status != "closed" and (payload.outcome or payload.correction_map_version)) or (payload.outcome != "fixed" and payload.correction_map_version):
+        raise HTTPException(422, "Итог проверки и версия исправления не соответствуют статусу")
     row = db.scalar(update(Report).where(Report.id == report_id, Report.revision == payload.revision)
-                    .values(status=payload.status, resolution=payload.resolution,
+                    .values(status=payload.status, resolution=payload.resolution, outcome=payload.outcome,
+                            correction_map_version=payload.correction_map_version,
                             updated_at=func.now(), revision=Report.revision + 1).returning(Report))
     if row is None:
         raise HTTPException(409 if db.get(Report, report_id) else 404, "Заявка изменилась или удалена")
-    view = ReportView.model_validate(row)
+    view = report_view(row, db.get(Publication, row.map_version))
     db.commit()
     return view
 

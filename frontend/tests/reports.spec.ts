@@ -1,21 +1,43 @@
 import { expect, test } from '@playwright/test';
 
-const key = process.env.POLYMAP_TEST_ADMIN_KEY;
+const username = process.env.POLYMAP_TEST_USERNAME;
+const password = process.env.POLYMAP_TEST_PASSWORD;
+const correctionVersion = process.env.POLYMAP_TEST_CORRECTION_VERSION;
 test('submit a report and close it in the moderation desk', async ({ page }, info) => {
-  test.skip(!key || info.project.name !== 'chromium-desktop', 'Requires local FastAPI and the test admin key.');
+  test.skip(!username || !password || !correctionVersion || info.project.name !== 'chromium-desktop', 'Requires local FastAPI, a test employee and a second published map.');
+  const current = await (await page.request.get('/api/maps/current')).json();
+  const bundle = await (await page.request.get(current.url)).json();
+  const place = bundle.places.find((item: { id: string }) => item.id === '6a6adde3-f5bc-42bd-9f9c-ca0b45c311ca');
+  const buildingName = bundle.buildings.find((item: { id: string }) => item.id === place.building).name;
+  expect((await page.request.get('/api/reports')).status()).toBe(401);
+  expect((await page.request.patch('/api/reports/1', { data: { status: 'review', revision: 1 } })).status()).toBe(401);
   await page.goto('/share/annotation?annotation=6a6adde3-f5bc-42bd-9f9c-ca0b45c311ca');
   await page.getByRole('button', { name: 'Сообщить об ошибке' }).click();
   const message = `Тестовая проверка подписи на плане ${Date.now()}`;
   await page.getByRole('textbox', { name: 'Описание ошибки на карте' }).fill(message);
   await page.getByRole('button', { name: 'Отправить', exact: true }).click();
-  await expect(page.getByText('Сообщение отправлено.')).toBeVisible();
+  await expect(page.getByText(/Сообщение отправлено. Номер заявки: №\d+/)).toBeVisible();
 
   await page.getByRole('link', { name: 'Стол заявок' }).click();
-  await page.getByLabel('Ключ доступа').fill(key!);
-  await page.getByRole('button', { name: 'Загрузить заявки' }).click();
+  await page.getByLabel('Имя сотрудника').fill(username!);
+  await page.getByLabel('Пароль').fill(password!);
+  await page.getByRole('button', { name: 'Войти' }).click();
+  await expect(page.getByText(message)).toBeVisible();
+  await page.getByRole('button', { name: 'Новая', exact: true }).click();
+  await expect(page.getByText(message)).toBeVisible();
+  await page.getByLabel('Фильтр по корпусу').fill(buildingName);
+  await page.getByRole('button', { name: buildingName, exact: true }).click();
   await expect(page.getByText(message)).toBeVisible();
   const result = page.getByLabel('Результат проверки').first();
   await result.fill('Подпись на плане проверена.');
+  await page.getByRole('button', { name: 'Исправлено' }).first().click();
+  await page.getByLabel('Версия исправленной карты').first().fill(correctionVersion!);
+  const saved = page.waitForResponse(response => response.request().method() === 'PATCH' && response.url().includes('/api/reports/'));
   await page.getByRole('button', { name: 'Закрыть заявку' }).first().click();
+  expect((await saved).status()).toBe(200);
+  await page.getByRole('button', { name: 'Все статусы' }).click();
   await expect(page.getByText(/№\d+ · Закрыта/).first()).toBeVisible();
+  await expect(page.getByRole('link', { name: `Исправленная версия: ${correctionVersion}` }).first()).toBeVisible();
+  await page.getByRole('button', { name: 'Выйти' }).click();
+  await expect(page.getByLabel('Имя сотрудника')).toBeVisible();
 });

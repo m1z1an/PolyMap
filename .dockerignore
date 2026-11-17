@@ -9,3 +9,7 @@
 **/test-results
 **/playwright-report
 **/__pycache__
+**/.repowise
+**/.pytest_cache
+**/pytest-cache-files-*
+backend/test_tmp

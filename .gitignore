@@ -8,3 +8,7 @@ android/
 __pycache__/
 playwright-report/
 test-results/
+.pytest_cache/
+pytest-cache-files-*/
+.repowise/
+backend/test_tmp/

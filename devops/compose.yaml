@@ -2,7 +2,8 @@ name: polymap
 
 services:
   postgres:
-    image: postgres:17
+    image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: polymap
       POSTGRES_USER: polymap
@@ -15,17 +16,24 @@ services:
     volumes:
       - polymap-db:/var/lib/postgresql/data
   api:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: devops/Dockerfile.backend
     environment:
       DATABASE_URL: postgresql+psycopg://polymap:${POSTGRES_PASSWORD}@postgres:5432/polymap
-      POLYMAP_ADMIN_KEY: ${POLYMAP_ADMIN_KEY:?Set POLYMAP_ADMIN_KEY}
       POLYMAP_ORIGINS: ${POLYMAP_ORIGINS:-}
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/maps/current', timeout=3).close()"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
   web:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: devops/Dockerfile.frontend
@@ -36,6 +44,7 @@ services:
       POLYMAP_HOST: 0.0.0.0
       POLYMAP_PORT: 8080
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 volumes:
   polymap-db:

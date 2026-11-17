@@ -5,10 +5,19 @@ type Manifest = { version: string; url: string };
 const bundled = '/maps/manifest.json';
 const api = process.env.EXPO_PUBLIC_API_URL ?? '';
 
-async function json<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: 'no-cache', signal: AbortSignal.timeout(5000) });
+async function json<T>(url: string, timeout = 5000): Promise<T> {
+  const response = await fetch(url, { cache: 'no-cache', signal: AbortSignal.timeout(timeout) });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
+}
+
+async function loadBundle(manifest: Manifest): Promise<Bundle> {
+  const url = manifest.url.startsWith('/api/') ? api + manifest.url : manifest.url;
+  const data = await json<Bundle>(url, 15000);
+  if (!data.revision || !data.buildings?.length || !data.places?.length || !data.nodes?.length) {
+    throw new Error('Неполный пакет карты');
+  }
+  return data;
 }
 
 export async function loadSnapshot(): Promise<Snapshot> {
@@ -30,12 +39,19 @@ export async function loadSnapshot(): Promise<Snapshot> {
     // The packaged map remains available if browser storage is disabled.
   }
   try {
-    const manifest = await json<Manifest>(`${api}/api/maps/current`).catch(() => json<Manifest>(bundled));
+    let fromApi = true;
+    let manifest = await json<Manifest>(`${api}/api/maps/current`).catch(() => {
+      fromApi = false;
+      return json<Manifest>(bundled);
+    });
     if (cached?.version === manifest.version) return cached;
-    const url = manifest.url.startsWith('/api/') ? api + manifest.url : manifest.url;
-    const data = await json<Bundle>(url);
-    if (!data.revision || !data.buildings?.length || !data.places?.length || !data.nodes?.length) {
-      throw new Error('Неполный пакет карты');
+    let data: Bundle;
+    try {
+      data = await loadBundle(manifest);
+    } catch (error) {
+      if (cached || !fromApi) throw error;
+      manifest = await json<Manifest>(bundled);
+      data = await loadBundle(manifest);
     }
     if (db) {
       try {

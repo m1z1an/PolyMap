@@ -155,12 +155,12 @@ export default function Navigator() {
     setSending(true);
     setNotice('');
     try {
-      await request('/reports', { method: 'POST', body: JSON.stringify({
+      const result = await request<{ id: number }>('/reports', { method: 'POST', body: JSON.stringify({
         map_version: snapshot.version, building_id: selected.building, place_id: selected.id, message: message.trim(),
       }) });
       setMessage('');
       setReport(false);
-      setNotice('Сообщение отправлено.');
+      setNotice(`Сообщение отправлено. Номер заявки: №${result.id}`);
     } catch (error) { setNotice((error as Error).message); }
     finally { setSending(false); }
   }
